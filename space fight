@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Space Fight - Web Edition</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html {
+            width: 100%; height: 100%;
+            background-color: #0b1d2e;
+            overflow: hidden; /* Mencegah scroll pada mobile */
+            touch-action: none; /* Mencegah gesture bawaan browser */
+            font-family: 'Courier New', Courier, monospace;
+        }
+        #game-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100%; height: 100%;
+            position: relative;
+        }
+        canvas {
+            background: linear-gradient(to bottom, #1a4a6e, #0e2a40);
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            /* Responsif: menyesuaikan ukuran window tapi tetap mempertahankan aspect ratio via JS */
+        }
+        /* UI Overlays */
+        .screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            z-index: 10;
+        }
+        .hidden { display: none !important; }
+        h1 { font-size: 3rem; color: #ffd700; text-shadow: 2px 2px 0 #ff0000; text-align: center; margin-bottom: 10px; }
+        p { font-size: 1.2rem; margin-bottom: 20px; text-align: center; max-width: 80%; }
+        button {
+            padding: 15px 40px;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: white;
+            background: #d32f2f;
+            border: 4px solid #b71c1c;
+            border-radius: 10px;
+            cursor: pointer;
+            text-transform: uppercase;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+            transition: transform 0.1s;
+        }
+        button:active { transform: scale(0.95); }
+        #hud {
+            position: absolute;
+            top: 10px; left: 50%;
+            transform: translateX(-50%);
+            width: 100%; max-width: 540px; /* Sesuai max width canvas */
+            display: flex;
+            justify-content: space-between;
+            padding: 0 20px;
+            color: white;
+            font-size: 1.2rem;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 5;
+            text-shadow: 1px 1px 2px black;
+        }
+        .health-bar {
+            width: 100px; height: 15px;
+            background: #333;
+            border: 2px solid white;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .health-fill {
+            width: 100%; height: 100%;
+            background: #00ff00;
+            transition: width 0.2s, background 0.2s;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="hud" class="hidden">
+        <div>Skor: <span id="scoreDisplay">0</span></div>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            HP
+            <div class="health-bar"><div id="healthFill" class="health-fill"></div></div>
+        </div>
+    </div>
+
+    <div id="startScreen" class="screen">
+        <h1>SPACE<br>FIGHT</h1>
+        <p>Sentuh & Geser (Mobile/Tablet)<br>Klik & Seret / Panah WASD (PC)<br>Tembakan Otomatis!</p>
+        <button onclick="startGame()">Mulai</button>
+    </div>
+
+    <div id="gameOverScreen" class="screen hidden">
+        <h1 style="color: #ff3333;">HANCUR!</h1>
+        <p>Skor Akhir: <span id="finalScore">0</span></p>
+        <button onclick="startGame()">Main Lagi</button>
+    </div>
+</div>
+
+<script>
+/**
+ * KONFIGURASI UTAMA
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const GAME_WIDTH = 540;
+const GAME_HEIGHT = 960; // Rasio Portrait 9:16
+
+// Mengatur ukuran internal canvas
+canvas.width = GAME_WIDTH;
+canvas.height = GAME_HEIGHT;
+
+// Variabel Global
+let gameState = 'START'; // START, PLAYING, GAMEOVER
+let lastTime = 0;
+let score = 0;
+let scaleRatio = 1;
+
+// Objek Game
+let player;
+let bullets = [];
+let enemies = [];
+let particles = [];
+let clouds = [];
+let enemySpawnTimer = 0;
+let enemySpawnInterval = 1.5; // Detik
+
+// Input
+const keys = {};
+let isDragging = false;
+let lastInputX = 0;
+let lastInputY = 0;
+
+/**
+ * RESIZE & RESPONSIVE LOGIC
+ */
+function resizeCanvas() {
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+    const windowRatio = windowWidth / windowHeight;
+    const gameRatio = GAME_WIDTH / GAME_HEIGHT;
+
+    let newWidth, newHeight;
+
+    if (windowRatio < gameRatio) {
+        newWidth = windowWidth;
+        newHeight = windowWidth / gameRatio;
+    } else {
+        newHeight = windowHeight;
+        newWidth = windowHeight * gameRatio;
+    }
+
+    canvas.style.width = `${newWidth}px`;
+    canvas.style.height = `${newHeight}px`;
+    scaleRatio = GAME_WIDTH / newWidth; 
+    
+    // Update HUD width match canvas
+    document.getElementById('hud').style.maxWidth = `${newWidth}px`;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas(); // Initial call
+
+/**
+ * KELAS-KELAS ENTITAS
+ */
+class Player {
+    constructor() {
+        this.w = 40;
+        this.h = 50;
+        this.x = GAME_WIDTH / 2;
+        this.y = GAME_HEIGHT - 100;
+        this.speed = 400; // Pixel per second
+        this.maxHealth = 100;
+        this.health = this.maxHealth;
+        this.shootTimer = 0;
+        this.shootInterval = 0.15; // Kecepatan tembak awal
+        this.weaponLevel = 1;
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+
+        // Api Jet
+        ctx.fillStyle = Math.random() > 0.5 ? '#ffaa00' : '#ff4400';
+        ctx.beginPath();
+        ctx.moveTo(-10, this.h/2);
+        ctx.lineTo(10, this.h/2);
+        ctx.lineTo(0, this.h/2 + 20 + Math.random()*10);
+        ctx.fill();
+
+        // Sayap Bawah
+        ctx.fillStyle = '#4a6b8c';
+        ctx.beginPath();
+        ctx.moveTo(0, 10);
+        ctx.lineTo(-this.w, 20);
+        ctx.lineTo(-this.w, 30);
+        ctx.lineTo(0, 20);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(0, 10);
+        ctx.lineTo(this.w, 20);
+        ctx.lineTo(this.w, 30);
+        ctx.lineTo(0, 20);
+        ctx.fill();
+
+        // Badan Pesawat
+        ctx.fillStyle = '#8ca6bd';
+        ctx.beginPath();
+        ctx.moveTo(0, -this.h/2); // Hidung
+        ctx.lineTo(12, 0);
+        ctx.lineTo(10, this.h/2);
+        ctx.lineTo(-10, this.h/2);
+        ctx.lineTo(-12, 0);
+        ctx.fill();
+
+        // Kokpit
+        ctx.fillStyle = '#2de2e6';
+        ctx.beginPath();
+        ctx.ellipse(0, -5, 6, 12, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    update(dt) {
+        // Kontrol Keyboard
+        if (keys['ArrowLeft'] || keys['a']) this.x -= this.speed * dt;
+        if (keys['ArrowRight'] || keys['d']) this.x += this.speed * dt;
+        if (keys['ArrowUp'] || keys['w']) this.y -= this.speed * dt;
+        if (keys['ArrowDown'] || keys['s']) this.y += this.speed * dt;
+
+        // Batas Layar
+        if (this.x < this.w) this.x = this.w;
+        if (this.x > GAME_WIDTH - this.w) this.x = GAME_WIDTH - this.w;
+        if (this.y < this.h) this.y = this.h;
+        if (this.y > GAME_HEIGHT - this.h/2) this.y = GAME_HEIGHT - this.h/2;
+
+        // Upgrade Senjata Otomatis berdasarkan skor
+        if (score > 3000) this.weaponLevel = 3;
+        else if (score > 1000) this.weaponLevel = 2;
+
+        // Auto Shooting
+        this.shootTimer -= dt;
+        if (this.shootTimer <= 0) {
+            this.shoot();
+            this.shootTimer = this.shootInterval;
+        }
+    }
+
+    shoot() {
+        if (this.weaponLevel === 1) {
+            bullets.push(new Bullet(this.x, this.y - this.h/2, -800, 'player', 0));
+        } else if (this.weaponLevel === 2) {
+            bullets.push(new Bullet(this.x - 10, this.y - this.h/2 + 10, -800, 'player', 0));
+            bullets.push(new Bullet(this.x + 10, this.y - this.h/2 + 10, -800, 'player', 0));
+        } else if (this.weaponLevel === 3) {
+            bullets.push(new Bullet(this.x, this.y - this.h/2, -800, 'player', 0));
+            bullets.push(new Bullet(this.x - 15, this.y - this.h/2 + 10, -800, 'player', -0.1));
+            bullets.push(new Bullet(this.x + 15, this.y - this.h/2 + 10, -800, 'player', 0.1));
+        }
+    }
+
+    hit(damage) {
+        this.health -= damage;
+        createParticles(this.x, this.y, '#ffff00', 5);
+        updateHUD();
+        if (this.health <= 0) {
+            createParticles(this.x, this.y, '#ff0000', 30, 3);
+            endGame();
+        }
+    }
+}
+
+class Bullet {
+    constructor(x, y, speedY, owner, dirX = 0) {
+        this.x = x;
+        this.y = y;
+        this.speedY = speedY;
+        this.speedX = dirX * 800;
+        this.owner = owner; // 'player' atau 'enemy'
+        this.radius = owner === 'player' ? 4 : 5;
+        this.markedForDeletion = false;
+        this.damage = owner === 'player' ? 10 : 15;
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = this.owner === 'player' ? '#ffffaa' : '#ff4444';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = ctx.fillStyle;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0; // reset
+    }
+
+    update(dt) {
+        this.y += this.speedY * dt;
+        this.x += this.speedX * dt;
+        if (this.y < -50 || this.y > GAME_HEIGHT + 50 || this.x < -50 || this.x > GAME_WIDTH + 50) {
+            this.markedForDeletion = true;
+        }
+    }
+}
+
+class Enemy {
+    constructor() {
+        this.x = Math.random() * (GAME_WIDTH - 60) + 30;
+        this.y = -50;
+        // Tipe musuh: 0 = biasa, 1 = cepat, 2 = besar/tank
+        let r = Math.random();
+        if (r < 0.2 && score > 500) this.type = 2;
+        else if (r < 0.5 && score > 200) this.type = 1;
+        else this.type = 0;
+
+        if (this.type === 0) {
+            this.w = 30; this.h = 30; this.hp = 20; this.speed = 150 + Math.random()*50; this.color = '#728c69'; this.scoreVal = 50;
+        } else if (this.type === 1) {
+            this.w = 20; this.h = 25; this.hp = 10; this.speed = 300 + Math.random()*100; this.color = '#a84632'; this.scoreVal = 80;
+        } else {
+            this.w = 60; this.h = 50; this.hp = 80; this.speed = 80; this.color = '#454545'; this.scoreVal = 200;
+            this.shootTimer = 1; // Musuh besar bisa nembak
+        }
+        
+        this.markedForDeletion = false;
+        this.hitboxR = this.w * 0.8;
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.fillStyle = this.color;
+        
+        if (this.type === 0 || this.type === 1) {
+            // Musuh Kecil / Cepat
+            ctx.beginPath();
+            ctx.moveTo(0, this.h/2); // Moncong ke bawah
+            ctx.lineTo(this.w/2, -this.h/2);
+            ctx.lineTo(-this.w/2, -this.h/2);
+            ctx.fill();
+        } else {
+            // Bomber Besar
+            ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+            ctx.fillStyle = '#666';
+            ctx.fillRect(-this.w/2 - 15, -this.h/4, 15, this.h/2); // Sayap kiri
+            ctx.fillRect(this.w/2, -this.h/4, 15, this.h/2); // Sayap kanan
+        }
+        ctx.restore();
+    }
+
+    update(dt) {
+        this.y += this.speed * dt;
+        
+        if (this.type === 2) {
+            this.shootTimer -= dt;
+            if (this.shootTimer <= 0) {
+                // Tembak peluru
+                bullets.push(new Bullet(this.x, this.y + this.h/2, 400, 'enemy'));
+                this.shootTimer = 1.5;
+            }
+        }
+
+        if (this.y > GAME_HEIGHT + 100) this.markedForDeletion = true;
+    }
+
+    hit(damage) {
+        this.hp -= damage;
+        createParticles(this.x, this.y, '#cccccc', 3);
+        if (this.hp <= 0) {
+            this.markedForDeletion = true;
+            createParticles(this.x, this.y, '#ff6600', this.type === 2 ? 20 : 10, this.type === 2 ? 2 : 1);
+            score += this.scoreVal;
+            updateHUD();
+        }
+    }
+}
+
+class Particle {
+    constructor(x, y, color, sizeMult=1) {
+        this.x = x; this.y = y;
+        this.vx = (Math.random() - 0.5) * 200 * sizeMult;
+        this.vy = (Math.random() - 0.5) * 200 * sizeMult;
+        this.life = 1;
+        this.color = color;
+        this.size = (Math.random() * 4 + 2) * sizeMult;
+    }
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.life -= dt * 2;
+    }
+    draw(ctx) {
+        ctx.globalAlpha = Math.max(0, this.life);
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+        ctx.globalAlpha = 1;
+    }
+}
+
+class Cloud {
+    constructor() {
+        this.x = Math.random() * GAME_WIDTH;
+        this.y = -200;
+        this.size = Math.random() * 60 + 40;
+        this.speed = Math.random() * 50 + 20;
+        this.opacity = Math.random() * 0.15 + 0.05;
+    }
+    update(dt) {
+        this.y += this.speed * dt;
+    }
+    draw(ctx) {
+        ctx.fillStyle = `rgba(255, 255, 255, ${this.opacity})`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+        ctx.arc(this.x + this.size*0.5, this.y - this.size*0.2, this.size*0.8, 0, Math.PI*2);
+        ctx.arc(this.x - this.size*0.5, this.y - this.size*0.1, this.size*0.7, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+/**
+ * SISTEM UTILITAS
+ */
+function createParticles(x, y, color, count, sizeMult=1) {
+    for (let i=0; i<count; i++) particles.push(new Particle(x, y, color, sizeMult));
+}
+
+function checkCollision(obj1, obj2, isCircle = false) {
+    // Toleransi hit box (Hitbox Porn) agar tidak terlalu mudah mati
+    let r1 = isCircle ? obj1.radius : (obj1.hitboxR || obj1.w/2) * 0.7;
+    let r2 = (obj2.hitboxR || obj2.w/2) * 0.7;
+    
+    let dx = obj1.x - obj2.x;
+    let dy = obj1.y - obj2.y;
+    let distance = Math.sqrt(dx*dx + dy*dy);
+    return distance < (r1 + r2);
+}
+
+function updateHUD() {
+    document.getElementById('scoreDisplay').innerText = score;
+    const hpPercent = Math.max(0, (player.health / player.maxHealth) * 100);
+    const hpFill = document.getElementById('healthFill');
+    hpFill.style.width = hpPercent + '%';
+    if(hpPercent > 50) hpFill.style.background = '#00ff00';
+    else if(hpPercent > 25) hpFill.style.background = '#ffff00';
+    else hpFill.style.background = '#ff0000';
+}
+
+/**
+ * LOGIKA INPUT (Relatif / Touch / Mouse / Keyboard)
+ */
+function handleInputStart(clientX, clientY) {
+    if (gameState !== 'PLAYING') return;
+    isDragging = true;
+    lastInputX = clientX;
+    lastInputY = clientY;
+}
+
+function handleInputMove(clientX, clientY) {
+    if (!isDragging || gameState !== 'PLAYING') return;
+    
+    // Hitung pergerakan, dikalikan scaleRatio agar sinkron dengan resolusi canvas
+    let dx = (clientX - lastInputX) * scaleRatio;
+    let dy = (clientY - lastInputY) * scaleRatio;
+    
+    player.x += dx;
+    player.y += dy;
+    
+    lastInputX = clientX;
+    lastInputY = clientY;
+}
+
+function handleInputEnd() {
+    isDragging = false;
+}
+
+// Touch Events
+canvas.addEventListener('touchstart', e => handleInputStart(e.touches[0].clientX, e.touches[0].clientY));
+canvas.addEventListener('touchmove', e => { e.preventDefault(); handleInputMove(e.touches[0].clientX, e.touches[0].clientY); }, {passive: false});
+canvas.addEventListener('touchend', handleInputEnd);
+
+// Mouse Events
+canvas.addEventListener('mousedown', e => handleInputStart(e.clientX, e.clientY));
+canvas.addEventListener('mousemove', e => handleInputMove(e.clientX, e.clientY));
+canvas.addEventListener('mouseup', handleInputEnd);
+canvas.addEventListener('mouseleave', handleInputEnd);
+
+// Keyboard Events
+window.addEventListener('keydown', e => keys[e.key] = true);
+window.addEventListener('keyup', e => keys[e.key] = false);
+
+/**
+ * ALUR PERMAINAN
+ */
+function startGame() {
+    document.getElementById('startScreen').classList.add('hidden');
+    document.getElementById('gameOverScreen').classList.add('hidden');
+    document.getElementById('hud').classList.remove('hidden');
+    
+    player = new Player();
+    bullets = [];
+    enemies = [];
+    particles = [];
+    clouds = [];
+    score = 0;
+    enemySpawnInterval = 1.5;
+    updateHUD();
+    
+    // Generate initial clouds
+    for(let i=0; i<5; i++) {
+        let c = new Cloud();
+        c.y = Math.random() * GAME_HEIGHT;
+        clouds.push(c);
+    }
+    
+    gameState = 'PLAYING';
+    lastTime = performance.now();
+    requestAnimationFrame(gameLoop);
+}
+
+function endGame() {
+    gameState = 'GAMEOVER';
+    document.getElementById('hud').classList.add('hidden');
+    document.getElementById('gameOverScreen').classList.remove('hidden');
+    document.getElementById('finalScore').innerText = score;
+}
+
+function update(dt) {
+    if (gameState !== 'PLAYING') return;
+
+    // Tingkatkan kesulitan
+    if (enemySpawnInterval > 0.4) {
+        enemySpawnInterval -= dt * 0.005; 
+    }
+
+    // Spawn Musuh
+    enemySpawnTimer -= dt;
+    if (enemySpawnTimer <= 0) {
+        enemies.push(new Enemy());
+        enemySpawnTimer = enemySpawnInterval;
+    }
+
+    // Spawn Awan (Background parralax)
+    if (Math.random() < dt * 0.5) clouds.push(new Cloud());
+
+    player.update(dt);
+
+    clouds.forEach(c => c.update(dt));
+    clouds = clouds.filter(c => c.y < GAME_HEIGHT + 200);
+
+    bullets.forEach(b => b.update(dt));
+    bullets = bullets.filter(b => !b.markedForDeletion);
+
+    enemies.forEach(e => {
+        e.update(dt);
+        // Tabrakan Musuh <-> Player
+        if (checkCollision(e, player)) {
+            player.hit(20);
+            e.hit(100); // Hancurkan musuh
+        }
+    });
+    enemies = enemies.filter(e => !e.markedForDeletion);
+
+    particles.forEach(p => p.update(dt));
+    particles = particles.filter(p => p.life > 0);
+
+    // Cek Tabrakan Peluru
+    bullets.forEach(b => {
+        if (b.owner === 'player') {
+            enemies.forEach(e => {
+                if (!e.markedForDeletion && checkCollision(b, e, true)) {
+                    b.markedForDeletion = true;
+                    e.hit(b.damage);
+                }
+            });
+        } else if (b.owner === 'enemy') {
+            if (checkCollision(b, player, true)) {
+                b.markedForDeletion = true;
+                player.hit(b.damage);
+            }
+        }
+    });
+}
+
+function draw() {
+    // Bersihkan layar
+    ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    // Gambar Awan Bawah
+    clouds.forEach(c => c.draw(ctx));
+
+    // Gambar Entitas
+    if (gameState === 'PLAYING') player.draw(ctx);
+    bullets.forEach(b => b.draw(ctx));
+    enemies.forEach(e => e.draw(ctx));
+    particles.forEach(p => p.draw(ctx));
+}
+
+function gameLoop(timestamp) {
+    // Hitung Delta Time (dt) agar kecepatan sama di monitor Hz berapapun
+    let dt = (timestamp - lastTime) / 1000;
+    if (dt > 0.1) dt = 0.1; // Batasi jika terjadi lag spike atau ganti tab
+    lastTime = timestamp;
+
+    if (gameState === 'PLAYING') {
+        update(dt);
+        draw();
+        requestAnimationFrame(gameLoop);
+    } else if (gameState === 'GAMEOVER') {
+        // Terus jalankan draw & update partikel agar ledakan akhir terlihat
+        update(dt);
+        draw();
+        if (particles.length > 0) requestAnimationFrame(gameLoop);
+    }
+}
+
+// Render background awal (sebelum mulai)
+ctx.fillStyle = '#0b1d2e';
+ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+</script>
+</body>
+</html>
